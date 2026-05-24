@@ -30,6 +30,17 @@ SENTENCE_TERMINATORS = "。？！；…!?\n"
 MID_SENTENCE_BREAKS = "，、：:,;"
 MID_SENTENCE_MIN_LEN = 10
 HARD_FLUSH_LEN = 30
+# Safety net for pure-English buffers that haven't produced a sentence
+# terminator yet. Generous so we don't slice a sentence mid-clause, but
+# still bounded so a runaway unpunctuated response eventually flushes.
+ENGLISH_HARD_FLUSH_LEN = 120
+
+# Hiragana / katakana / CJK ideographs / half-width kana. If any of these
+# appear in the pending buffer we treat the content as CJK-style (no spaces,
+# dense per-char) and allow the mid-sentence comma break + 30-char flush.
+# Pure-English buffers skip those and wait for a real sentence terminator
+# so we don't chop a sentence at the first comma.
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff66-\uff9f]")
 
 # Strip punctuation and whitespace before comparing ASR output against the
 # assistant's recently-spoken text. Keeps both Chinese full-width punctuation
@@ -43,6 +54,30 @@ def _normalize_for_match(text: str) -> str:
     return _NORMALIZE_RE.sub("", text).lower()
 
 
+def _has_cjk(text: str) -> bool:
+    return bool(_CJK_RE.search(text))
+
+
+def _terminator_end(pending: str) -> int:
+    """Return the index *after* the first sentence terminator in ``pending``.
+
+    Returns -1 when no terminator is present. ASCII period uses a one-char
+    lookahead so we don't chop ``3.14`` / ``e.g.`` apart: ``.`` only counts
+    when it's followed by whitespace or sits at the end of the buffer (the
+    end-of-buffer case is safe because the stream-end flush will still emit
+    whatever follows once it arrives).
+    """
+    length = len(pending)
+    for index, char in enumerate(pending):
+        if char in SENTENCE_TERMINATORS:
+            return index + 1
+        if char == ".":
+            next_index = index + 1
+            if next_index >= length or pending[next_index].isspace():
+                return next_index
+    return -1
+
+
 def pop_speakable_chunk(pending: str) -> str:
     """Return the longest leading slice of ``pending`` ready to be spoken.
 
@@ -51,16 +86,34 @@ def pop_speakable_chunk(pending: str) -> str:
     if not pending:
         return ""
 
-    for index, char in enumerate(pending):
-        if char in SENTENCE_TERMINATORS:
-            return pending[: index + 1]
+    end = _terminator_end(pending)
+    if end != -1:
+        return pending[:end]
 
-    if len(pending) >= MID_SENTENCE_MIN_LEN:
-        for index, char in enumerate(pending):
-            if char in MID_SENTENCE_BREAKS:
-                return pending[: index + 1]
+    if _has_cjk(pending):
+        # CJK / mixed content: dense per-char and missing word boundaries,
+        # so cut on a comma once the chunk is long enough, or hard-flush
+        # at 30 chars to keep first-audio latency bounded.
+        if len(pending) >= MID_SENTENCE_MIN_LEN:
+            for index, char in enumerate(pending):
+                if char in MID_SENTENCE_BREAKS and index + 1 >= MID_SENTENCE_MIN_LEN:
+                    return pending[: index + 1]
+        if len(pending) >= HARD_FLUSH_LEN:
+            space = pending.rfind(" ")
+            if space >= MID_SENTENCE_MIN_LEN:
+                return pending[:space]
+            return pending
+        return ""
 
-    if len(pending) >= HARD_FLUSH_LEN:
+    # Pure English / whitespace-delimited buffer: wait for a sentence
+    # terminator so we never speak half a clause. The high-water mark
+    # below only fires as a safety net when the model produces an
+    # unusually long unpunctuated burst, and it always lands on a word
+    # boundary so the TTS chunk reads naturally.
+    if len(pending) >= ENGLISH_HARD_FLUSH_LEN:
+        space = pending.rfind(" ")
+        if space >= MID_SENTENCE_MIN_LEN:
+            return pending[:space]
         return pending
 
     return ""
@@ -127,6 +180,14 @@ class ChatOrchestrator:
         # Below this (normalized) length we don't trust the self-loop check
         # because short phrases like "好的" appear in many real utterances.
         self._self_loop_min_chars = 4
+        # Minimum ASR partial length (normalized chars) before the watcher
+        # triggers a barge-in. Kept smaller than `_self_loop_min_chars` so we
+        # don't wait for the echo-filter threshold: shorter is faster but more
+        # exposed to AEC leakage being transcribed as a few characters and
+        # falsely cancelling the assistant. 2 is a reasonable middle ground;
+        # set to 1 for maximum responsiveness, raise back to 4 if you see
+        # spurious cancellations while wearing no headphones.
+        self._barge_in_min_chars = 2
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -286,7 +347,7 @@ class ChatOrchestrator:
             # the barge-in until the transcription has enough content for
             # us to confidently distinguish real speech from a fragment of
             # echo. The full text is still committed at speech_end.
-            if len(_normalize_for_match(text)) < self._self_loop_min_chars:
+            if len(_normalize_for_match(text)) < self._barge_in_min_chars:
                 continue
             LOGGER.info(
                 "Barge-in: ASR confirmed user speech (%r)", text[:40]
