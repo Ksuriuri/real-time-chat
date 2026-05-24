@@ -12,6 +12,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from aec_processor import AecProcessor
 from audio_io import MicSource, SpeakerSink
 from conversation import AsyncArkStream, ConversationHistory
 from orchestrator import (
@@ -104,6 +105,34 @@ def env_float(key: str, default: float | None) -> float | None:
     if value is None:
         return default
     return float(value)
+
+
+def env_bool(key: str, default: bool) -> bool:
+    value = env(key)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _build_aec(enable: bool, *, ns_level: int, stream_delay_ms: int) -> AecProcessor | None:
+    if not enable:
+        return None
+    if not AecProcessor.is_available():
+        LOGGER.warning(
+            "ENABLE_AEC=1 but pywebrtc-audio is not installed; running without AEC."
+        )
+        return None
+    try:
+        aec = AecProcessor(ns_level=ns_level, stream_delay_ms=stream_delay_ms)
+    except Exception as exc:
+        LOGGER.warning("AEC initialization failed (%s); running without AEC.", exc)
+        return None
+    LOGGER.info(
+        "AEC enabled (WebRTC AEC3 + NS level=%d, stream_delay_ms=%d)",
+        ns_level,
+        stream_delay_ms,
+    )
+    return aec
 
 
 _PLACEHOLDER_PREFIXES = ("your-", "your_")
@@ -224,7 +253,13 @@ async def amain(args: argparse.Namespace) -> None:
         model=env("TTS_MODEL", "seed-tts-2.0-standard") or "seed-tts-2.0-standard",
     )
 
-    speaker = SpeakerSink()
+    aec = _build_aec(
+        env_bool("ENABLE_AEC", True),
+        ns_level=env_int("AEC_NS_LEVEL", 2) or 2,
+        stream_delay_ms=env_int("AEC_STREAM_DELAY_MS", 0) or 0,
+    )
+
+    speaker = SpeakerSink(aec=aec)
     orchestrator: ChatOrchestrator | None = None
 
     loop = asyncio.get_running_loop()
@@ -233,7 +268,7 @@ async def amain(args: argparse.Namespace) -> None:
         if orchestrator is not None:
             await orchestrator.on_mic_pcm(pcm)
 
-    mic = MicSource(loop=loop, on_pcm=on_pcm)
+    mic = MicSource(loop=loop, on_pcm=on_pcm, aec=aec)
 
     orchestrator = ChatOrchestrator(
         vad_client=vad_client,

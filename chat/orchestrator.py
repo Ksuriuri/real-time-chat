@@ -9,7 +9,11 @@ is speaking; the ASR session is only opened during user speech windows.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
+import re
+import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -26,6 +30,17 @@ SENTENCE_TERMINATORS = "。？！；…!?\n"
 MID_SENTENCE_BREAKS = "，、：:,;"
 MID_SENTENCE_MIN_LEN = 10
 HARD_FLUSH_LEN = 30
+
+# Strip punctuation and whitespace before comparing ASR output against the
+# assistant's recently-spoken text. Keeps both Chinese full-width punctuation
+# and ASCII punctuation out of the way without touching the actual characters.
+_NORMALIZE_RE = re.compile(
+    r"[\s\u3000\.,?!;:。，？！；：、…\"'“”‘’()\[\]{}<>～~`\-_/\\]+"
+)
+
+
+def _normalize_for_match(text: str) -> str:
+    return _NORMALIZE_RE.sub("", text).lower()
 
 
 def pop_speakable_chunk(pending: str) -> str:
@@ -84,6 +99,13 @@ class ChatOrchestrator:
 
         self._asr_session: StreamingAsrSession | None = None
         self._asr_lock = asyncio.Lock()
+        # Serializes barge-in attempts so the watcher and the speech_end
+        # handler can't both be awaiting the same assistant task concurrently.
+        # Without this, cancelling the watcher mid-barge-in cascades through
+        # `wait_for` into the assistant task itself, and the duplicate
+        # `wait_for` in the speech_end path then surfaces a CancelledError
+        # that takes down the whole orchestrator.
+        self._barge_in_lock = asyncio.Lock()
         # Side-channel buffer that captures mic PCM arriving between a
         # speech_start event and the moment the ASR session is ready to receive
         # audio. Without it, the head of the utterance is lost during barge-in
@@ -96,6 +118,15 @@ class ChatOrchestrator:
         # speaker is producing audio so acoustic echo can't falsely trigger
         # cancellation.
         self._barge_in_watcher: asyncio.Task[None] | None = None
+        # Recently-synthesized assistant text used to filter ASR self-loops:
+        # if AEC leaks a fragment through and ASR transcribes it, the text
+        # will overlap with what we just told TTS to speak. Each entry is
+        # `(monotonic_timestamp_s, normalized_text)`.
+        self._spoken_window: deque[tuple[float, str]] = deque()
+        self._spoken_window_ttl_s = 8.0
+        # Below this (normalized) length we don't trust the self-loop check
+        # because short phrases like "好的" appear in many real utterances.
+        self._self_loop_min_chars = 4
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -224,18 +255,44 @@ class ChatOrchestrator:
             raise
 
     async def _watch_for_barge_in(self, session: StreamingAsrSession) -> None:
-        """Cancel the running assistant turn once ASR confirms real speech."""
-        try:
-            await session.partial_text_event.wait()
-        except asyncio.CancelledError:
+        """Cancel the running assistant turn once ASR confirms real speech.
+
+        Loops over partial-text updates so we can re-evaluate each one. If the
+        text looks like an echo of what the assistant just said, we silently
+        clear the event and keep waiting; only a transcription that doesn't
+        match the recently-spoken window triggers the actual barge-in.
+        """
+        while True:
+            try:
+                await session.text_updated.wait()
+            except asyncio.CancelledError:
+                return
+            # A newer speech_start replaces this watcher via
+            # `_cancel_barge_in_watcher`, so a stale watcher must not race
+            # against the next turn.
+            if self._barge_in_watcher is not asyncio.current_task():
+                return
+            text = session.latest_text
+            session.text_updated.clear()
+            if not text:
+                continue
+            if self._is_self_loop(text):
+                LOGGER.info(
+                    "Suppressing echo-likely partial: %r",
+                    text[:40],
+                )
+                continue
+            # Short partials happen at the start of every utterance; defer
+            # the barge-in until the transcription has enough content for
+            # us to confidently distinguish real speech from a fragment of
+            # echo. The full text is still committed at speech_end.
+            if len(_normalize_for_match(text)) < self._self_loop_min_chars:
+                continue
+            LOGGER.info(
+                "Barge-in: ASR confirmed user speech (%r)", text[:40]
+            )
+            await self._barge_in_if_speaking()
             return
-        # Only barge in if this watcher is still the canonical one. A newer
-        # speech_start replaces it via `_cancel_barge_in_watcher`, so a stale
-        # watcher must not race against the next turn.
-        if self._barge_in_watcher is not asyncio.current_task():
-            return
-        LOGGER.info("Barge-in: ASR confirmed user speech")
-        await self._barge_in_if_speaking()
 
     def _cancel_barge_in_watcher(self) -> None:
         watcher = self._barge_in_watcher
@@ -244,6 +301,56 @@ class ChatOrchestrator:
         self._barge_in_watcher = None
         if not watcher.done():
             watcher.cancel()
+
+    def _record_spoken(self, text: str) -> None:
+        """Push assistant TTS text into the rolling self-loop window."""
+        norm = _normalize_for_match(text)
+        if not norm:
+            return
+        now = time.monotonic()
+        self._spoken_window.append((now, norm))
+        cutoff = now - self._spoken_window_ttl_s
+        while self._spoken_window and self._spoken_window[0][0] < cutoff:
+            self._spoken_window.popleft()
+
+    def _is_self_loop(self, text: str) -> bool:
+        """True only when ASR text confidently overlaps a recent utterance.
+
+        Short text (e.g. "继续讲", "换个话题", "行") returns False because
+        the heuristic is too noisy below ~4 characters: incidental overlap
+        of one or two common characters yields high ratios. Genuine TTS
+        echo almost always produces multi-character fragments because TTS
+        chunks aren't single characters. The watcher loop has its own
+        "wait for more text" rule that handles ASR's early short partials
+        independently.
+        """
+        norm = _normalize_for_match(text)
+        if len(norm) < self._self_loop_min_chars:
+            return False
+        cutoff = time.monotonic() - self._spoken_window_ttl_s
+        while self._spoken_window and self._spoken_window[0][0] < cutoff:
+            self._spoken_window.popleft()
+        # ASR routinely inserts/drops one or two filler characters when
+        # transcribing TTS echo (e.g. assistant said "讲个软乎乎的" -> ASR
+        # "讲一个软乎乎的"), so a strict substring match misses those. Sum
+        # the lengths of all matching blocks via Ratcliff-Obershelp and
+        # treat the transcription as echo when 70% or more of its content
+        # aligns with one of the recent utterances AND the matched portion
+        # is at least 5 characters in total. The absolute floor stops short
+        # paraphrases like "换个话题" (3 chars matching "换点话题") from
+        # being mistaken for echo of unrelated assistant proposals.
+        for _, recent in self._spoken_window:
+            if not recent:
+                continue
+            if norm in recent or recent in norm:
+                return True
+            matcher = difflib.SequenceMatcher(
+                None, norm, recent, autojunk=False
+            )
+            total_match = sum(block.size for block in matcher.get_matching_blocks())
+            if total_match >= 5 and total_match / len(norm) >= 0.7:
+                return True
+        return False
 
     async def _handle_speech_end(self) -> None:
         async with self._asr_lock:
@@ -273,6 +380,12 @@ class ChatOrchestrator:
         if not text:
             LOGGER.info("ASR returned empty text; ignoring utterance")
             return
+        if self._is_self_loop(text):
+            LOGGER.info(
+                "Discarding self-loop transcription (%r); assistant continues.",
+                text[:60],
+            )
+            return
 
         LOGGER.info("USER: %s", text)
         # If barge-in was deferred (speaker was active and the watcher hadn't
@@ -299,24 +412,39 @@ class ChatOrchestrator:
                 pass
 
     async def _barge_in_if_speaking(self) -> None:
-        task = self._assistant_task
-        cancel = self._assistant_cancel
-        if task is None or task.done():
-            return
+        async with self._barge_in_lock:
+            task = self._assistant_task
+            cancel = self._assistant_cancel
+            if task is None or task.done():
+                return
 
-        LOGGER.info("Barge-in: cancelling assistant turn")
-        if cancel is not None:
-            cancel.set()
-        self._speaker.flush_and_restart()
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except asyncio.TimeoutError:
-            LOGGER.warning("Assistant task did not finish within barge-in timeout")
-        except Exception as exc:
-            LOGGER.warning("Assistant task error during barge-in: %s", exc)
-        finally:
-            self._assistant_task = None
-            self._assistant_cancel = None
+            LOGGER.info("Barge-in: cancelling assistant turn")
+            if cancel is not None:
+                cancel.set()
+            self._speaker.flush_and_restart()
+            try:
+                # `shield` keeps a cancellation of *this* coroutine from
+                # cascading into the assistant task. The cancel event above
+                # is already telling it to wind down cleanly; we just want
+                # to wait for that to finish.
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except asyncio.TimeoutError:
+                LOGGER.warning("Assistant task did not finish within barge-in timeout")
+            except asyncio.CancelledError:
+                # Only re-raise if our caller is actually cancelling us.
+                # Otherwise this CancelledError came from the awaited task
+                # being cancelled by another path (e.g. a sibling watcher
+                # whose `wait_for` was torn down), and swallowing it keeps
+                # the orchestrator alive.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            except Exception as exc:
+                LOGGER.warning("Assistant task error during barge-in: %s", exc)
+            finally:
+                if self._assistant_task is task:
+                    self._assistant_task = None
+                    self._assistant_cancel = None
 
     async def _run_assistant_turn(self, cancel: asyncio.Event) -> None:
         pending = ""
@@ -378,6 +506,10 @@ class ChatOrchestrator:
         if not text.strip():
             return
         LOGGER.info("TTS chunk: %s", text)
+        # Record what we're about to speak before any TTS / playback latency
+        # so a quick echo round-trip (~1s) is already in the window when ASR
+        # transcribes it.
+        self._record_spoken(text)
         try:
             async for pcm in self._tts.synthesize(text, cancel_event=cancel):
                 if cancel.is_set():

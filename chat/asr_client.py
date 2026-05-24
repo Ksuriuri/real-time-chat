@@ -141,12 +141,15 @@ class StreamingAsrSession:
         self._buffer = bytearray()
         self._send_lock = asyncio.Lock()
         self._receiver: asyncio.Task[str] | None = None
-        self._latest_text = ""
+        # Latest non-empty partial transcription. The orchestrator reads this
+        # snapshot from a watcher task to decide whether the new audio is real
+        # user speech or an echo of the assistant's own TTS output.
+        self.latest_text = ""
         self._first_text_s: float | None = None
-        # Set the first time the server returns a non-empty partial text. The
-        # orchestrator uses this as a "real speech confirmed" signal to gate
-        # barge-in against acoustic-echo false triggers.
-        self.partial_text_event = asyncio.Event()
+        # Set every time `latest_text` updates. Designed for a consumer that
+        # waits, reads `latest_text`, then clears the event before waiting
+        # again so each new ASR partial wakes the watcher exactly once.
+        self.text_updated = asyncio.Event()
         self._final_s: float | None = None
         self._start_time: float | None = None
         self._send_done_s: float | None = None
@@ -229,7 +232,7 @@ class StreamingAsrSession:
                 "ASR finalize timed out after %.2fs, falling back to last partial",
                 timeout_s,
             )
-            text = self._latest_text
+            text = self.latest_text
             self._receiver.cancel()
 
         return AsrResult(
@@ -283,16 +286,16 @@ class StreamingAsrSession:
                 if isinstance(result, dict):
                     text = result.get("text") or ""
                     if text:
-                        self._latest_text = text
+                        self.latest_text = text
                         if self._first_text_s is None:
                             self._first_text_s = now_s
-                        self.partial_text_event.set()
+                        self.text_updated.set()
 
                 if frame.get("flags") in {FLAG_LAST_NO_SEQ, FLAG_NEG_SEQ}:
                     self._final_s = now_s
-                    return self._latest_text
+                    return self.latest_text
         except websockets.ConnectionClosed:
-            return self._latest_text
+            return self.latest_text
 
     def _build_request(self) -> dict[str, Any]:
         return {

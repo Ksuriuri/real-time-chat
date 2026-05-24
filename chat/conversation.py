@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import threading
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -84,6 +85,11 @@ class AsyncArkStream:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=64)
         messages = history.to_ark_messages()
+        # Worker-side stop signal. Distinct from the user-facing barge-in
+        # `cancel_event` so a clean stream finish (or a generator that the
+        # caller stopped iterating) doesn't masquerade as a barge-in to the
+        # orchestrator's "interrupted" bookkeeping.
+        worker_stop = threading.Event()
 
         def _worker() -> None:
             try:
@@ -93,7 +99,7 @@ class AsyncArkStream:
                     thinking_disabled=thinking_disabled,
                     temperature=temperature,
                 ):
-                    if cancel_event.is_set():
+                    if cancel_event.is_set() or worker_stop.is_set():
                         break
                     asyncio.run_coroutine_threadsafe(queue.put(token), loop)
             except Exception as exc:
@@ -116,5 +122,5 @@ class AsyncArkStream:
                     raise item
                 yield item
         finally:
-            cancel_event.set()
+            worker_stop.set()
             await future

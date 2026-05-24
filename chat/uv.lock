@@ -328,6 +328,24 @@ wheels = [
 ]
 
 [[package]]
+name = "pywebrtc-audio"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4e/61/a204f921c4e6cc4d7866308b82c5c2ad939c0e831c774515ab727b3c76e6/pywebrtc_audio-0.1.0.tar.gz", hash = "sha256:e51635e141034df088a0cc4ce9f90ffaaca6ece7015b5a24d38146f9afa72d95", size = 1746934, upload-time = "2026-05-19T04:25:36.953Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6e/0c/f4a865a831389e74185731edf31f2b915943f2288b7bead20a2eebcdfb12/pywebrtc_audio-0.1.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:7b485f6eb033032c372fa2f3e59baaa7bd28538c8d9c862d58128e52a8664dea", size = 401849, upload-time = "2026-05-19T04:25:26.434Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/89/52b1205dd5b0c9f0bfea2eed1062a27549e097b42ba22ad4c541a2efd32b/pywebrtc_audio-0.1.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:180db79d375e41f6ff8c082b924b128a6f3f79c93d7bc2053446eab150bf6c0e", size = 358690, upload-time = "2026-05-19T04:25:28.073Z" },
+    { url = "https://files.pythonhosted.org/packages/12/93/bbfa966cc04c627f6474d2f8406eb83d307c20f96d0f170ca8993ffe9337/pywebrtc_audio-0.1.0-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:26ffea3f6c06665e7ca501c8ac800a0522e46f9ca8e1a5ade57d94271c859fba", size = 412443, upload-time = "2026-05-19T04:25:29.41Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/26/1ebfe836271c4d2b6cc0d41e41f93a2c8d7fba89d0e86a2d7742516e6360/pywebrtc_audio-0.1.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:c1768aa038ea51d8c35e5e59e1bb10d8fccd5c75a188c312152119586cafd19d", size = 450826, upload-time = "2026-05-19T04:25:30.767Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/05/7a71cf2ae5c5e3971f17aa36ea217d1933ea0fdb6979a8bc63df7e5f8bff/pywebrtc_audio-0.1.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:6a88f1ade674bbfb3253f58c57ca0955347b5d6b356654a9b0907e51aca9c927", size = 1348839, upload-time = "2026-05-19T04:25:32.328Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/a0/fea917b67bfc0c5ae04f4f83b223258585ad41cbe5e9d61947c66e069ead/pywebrtc_audio-0.1.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:6a4afdb3cd92ef65185ea26c8b0d743db0a8cc4d8b890d6a29e209ff3ff90be4", size = 1428680, upload-time = "2026-05-19T04:25:33.833Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/f7/c19df55667596cf3b851f2c1fbd774689b5a1565c841e5b091f35f134e48/pywebrtc_audio-0.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:d4ade645f7c8c03bb26ec0b56fd140473125a303b09b186074a90700fd32ffe4", size = 311920, upload-time = "2026-05-19T04:25:35.233Z" },
+]
+
+[[package]]
 name = "real-time-chat-orchestrator"
 version = "0.1.0"
 source = { virtual = "." }
@@ -335,7 +353,9 @@ dependencies = [
     { name = "httpx" },
     { name = "numpy" },
     { name = "python-dotenv" },
+    { name = "pywebrtc-audio" },
     { name = "sounddevice" },
+    { name = "soxr" },
     { name = "volcengine-python-sdk", extra = ["ark"] },
     { name = "websockets" },
 ]
@@ -345,7 +365,9 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "pywebrtc-audio", specifier = ">=0.1" },
     { name = "sounddevice", specifier = ">=0.5" },
+    { name = "soxr", specifier = ">=0.5" },
     { name = "volcengine-python-sdk", extras = ["ark"], specifier = ">=5.0.28" },
     { name = "websockets", specifier = ">=15.0" },
 ]
@@ -373,6 +395,27 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/88/a1/d19dd9889cd4bce2e233c4fac007cd8daaf5b9fe6e6a5d432cf17be0b807/sounddevice-0.5.5-py3-none-win32.whl", hash = "sha256:1234cc9b4c9df97b6cbe748146ae0ec64dd7d6e44739e8e42eaa5b595313a103", size = 317765, upload-time = "2026-01-23T18:36:39.047Z" },
     { url = "https://files.pythonhosted.org/packages/c3/0e/002ed7c4c1c2ab69031f78989d3b789fee3a7fba9e586eb2b81688bf4961/sounddevice-0.5.5-py3-none-win_amd64.whl", hash = "sha256:cfc6b2c49fb7f555591c78cb8ecf48d6a637fd5b6e1db5fec6ed9365d64b3519", size = 365324, upload-time = "2026-01-23T18:36:40.496Z" },
     { url = "https://files.pythonhosted.org/packages/4e/39/a61d4b83a7746b70d23d9173be688c0c6bfc7173772344b7442c2c155497/sounddevice-0.5.5-py3-none-win_arm64.whl", hash = "sha256:3861901ddd8230d2e0e8ae62ac320cdd4c688d81df89da036dcb812f757bb3e6", size = 317115, upload-time = "2026-01-23T18:36:42.235Z" },
+]
+
+[[package]]
+name = "soxr"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ed/11/27cebce4a108f77afea7c80545115536b45e3f11ebfb914f638fdd9ba847/soxr-1.1.0.tar.gz", hash = "sha256:9f228ae21c78fa9359ca98d8a5e8e91f30639e438e574133dace62c5b5309e44", size = 173067, upload-time = "2026-05-03T00:15:18.214Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/8a/f3da7973b5f1b05d2d7e94d5376b881dcbc05297900cae6c3d33d95b209b/soxr-1.1.0-cp312-abi3-macosx_10_14_x86_64.whl", hash = "sha256:e0e09fa633ce2e67df08b298afced4d184f6e753fc330f241022250f1d0d61da", size = 204124, upload-time = "2026-05-03T00:14:54.505Z" },
+    { url = "https://files.pythonhosted.org/packages/03/dc/200013a74641f8774664bbcd2346c695c05c2e300ea792adcb40a293eed0/soxr-1.1.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:d6a7ad82b8d5f3fcc04b1d2ca055562b96af571e1d4fa7c6c61d0fb509ac43b4", size = 165457, upload-time = "2026-05-03T00:14:56.007Z" },
+    { url = "https://files.pythonhosted.org/packages/88/2b/2e5eba817a762a2ec589ff165b8bc5955b25a0ad140045f7cd8e45410543/soxr-1.1.0-cp312-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:bf98c0d7b7d5ef5bf072fee8d3020e8b664f2d195933ea7bc5089267c2e22a06", size = 206529, upload-time = "2026-05-03T00:14:57.646Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/f1/0e55195893228609c9a08c3b13b7a83a46c3a992cd00d3304f0f320cfb07/soxr-1.1.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3b033078e86f3c4a658e5697fac8995764fad9e799563616b630136b613167f1", size = 240413, upload-time = "2026-05-03T00:14:59.363Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/4d/621e4150e4815246ad552d215a8a294a90143fedd19ee442cf82d3b3abc8/soxr-1.1.0-cp312-abi3-win_amd64.whl", hash = "sha256:6ae2a174bffea94e8ead857dad85999d3f49f091774dbad5b046c0417d7092f4", size = 174357, upload-time = "2026-05-03T00:15:00.724Z" },
+    { url = "https://files.pythonhosted.org/packages/76/cd/77b74f1e95af0e11e52e9a034421aece7f7b45afd15a909afd41d5a5d102/soxr-1.1.0-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:a941f5aaa0b8abced24318105c1ea22576afcc1138c19f625716ce4e2f76ad64", size = 207990, upload-time = "2026-05-03T00:15:02.1Z" },
+    { url = "https://files.pythonhosted.org/packages/30/86/600cc31f982288167a59972746f117790162012546f995a32b5a55394b16/soxr-1.1.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:feebcba99ac99adb8009d46c8f4c1956b8c167576b0ae8a6fb47502e9a6f78e7", size = 169288, upload-time = "2026-05-03T00:15:03.75Z" },
+    { url = "https://files.pythonhosted.org/packages/39/e4/80cd9aae0645513db1076d4384e8b2d895faf5009218b4a04348012c54fc/soxr-1.1.0-cp314-cp314t-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:52c9ca84e3dc656d83acc424574770e20ea8e0704dc3842d4e27b0fe9d3ba449", size = 211405, upload-time = "2026-05-03T00:15:05.395Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/d6/cc3c80ac9b2289da4cf46c5d53b05e4327e6f5560a25868d06f9e2213af1/soxr-1.1.0-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f4977323ef9c3aa3c2a26ff5fe0191c84b8fd759daf7afb1f25a91a55ad8b730", size = 244617, upload-time = "2026-05-03T00:15:07.134Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/9e/f7af5fae841ffe32ed8440234ea2ad6adecca3bd92b6101076268c429000/soxr-1.1.0-cp314-cp314t-win_amd64.whl", hash = "sha256:e17d4ef9b0185214b2c0935605ae63f827ea423bc74964be44763d68d2b6c21e", size = 187253, upload-time = "2026-05-03T00:15:08.813Z" },
 ]
 
 [[package]]
