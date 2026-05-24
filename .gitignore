@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.Python
+*.egg-info/
+dist/
+build/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Logs & caches
+*.log
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Model artifacts (large binaries)
+checkpoints/
+models/
+*.pt
+*.pth
+*.onnx
+*.bin
+*.safetensors
+
+# Build outputs
+*.local
+coverage/
+htmlcov/
+
+# Generated TTS samples
+tts/output/
+
+temp.py

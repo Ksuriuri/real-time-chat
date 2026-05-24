@@ -1,0 +1,16 @@
+[project]
+name = "real-time-chat-orchestrator"
+version = "0.1.0"
+description = "Realtime voice chat orchestrator wiring Silero VAD, Volcengine ASR, Ark LLM and seed-tts-2.0."
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28",
+    "numpy>=2.0",
+    "python-dotenv>=1.0",
+    "sounddevice>=0.5",
+    "volcengine-python-sdk[ark]>=5.0.28",
+    "websockets>=15.0",
+]
+
+[tool.uv]
+package = false

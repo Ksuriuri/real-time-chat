@@ -1,0 +1,11 @@
+[project]
+name = "real-time-chat-llm"
+version = "0.1.0"
+description = "Volcengine Ark language model client for the real-time chat agent."
+requires-python = ">=3.13"
+dependencies = [
+    "volcengine-python-sdk[ark]>=5.0.28",
+]
+
+[tool.uv]
+package = false
