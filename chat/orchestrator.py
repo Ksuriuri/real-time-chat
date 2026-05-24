@@ -511,6 +511,70 @@ class ChatOrchestrator:
         pending = ""
         spoken_segments: list[str] = []
 
+        # TTS pipeline: each ready chunk fans out to its own short-lived
+        # WebSocket synthesis task, while a single consumer drains them in
+        # order and forwards PCM to the speaker. The bounded queue means
+        # chunk N+1's WS handshake + first audio frame happen concurrently
+        # with chunk N's playback instead of stacking serially after it,
+        # which is what made gaps between TTS chunks visible in the logs.
+        # `seed-tts-2.0/unidirectional/stream` is one-synthesis-per-WS by
+        # protocol, so we can't truly reuse a single connection here; the
+        # parallel handshakes in this pipeline are the closest equivalent.
+        PipelineItem = tuple[str, "asyncio.Queue[bytes | None]"]
+        pipeline: asyncio.Queue[PipelineItem | None] = asyncio.Queue(maxsize=2)
+        synth_tasks: list[asyncio.Task[None]] = []
+
+        async def synth_worker(text: str, pcm_q: "asyncio.Queue[bytes | None]") -> None:
+            try:
+                async for pcm in self._tts.synthesize(text, cancel_event=cancel):
+                    if cancel.is_set():
+                        break
+                    await pcm_q.put(pcm)
+            except Exception as exc:
+                LOGGER.warning("TTS failed for chunk %r: %s", text, exc)
+            finally:
+                # None marks "this chunk's PCM stream is done" so the
+                # consumer can advance to the next pipeline entry.
+                await pcm_q.put(None)
+
+        async def speaker_consumer() -> None:
+            while True:
+                item = await pipeline.get()
+                if item is None:
+                    return
+                _, pcm_q = item
+                while True:
+                    pcm = await pcm_q.get()
+                    if pcm is None:
+                        break
+                    if cancel.is_set():
+                        # Keep draining so synth tasks can finish and the
+                        # producer's `pipeline.put` doesn't block forever,
+                        # but stop pushing audio to the speaker.
+                        continue
+                    self._speaker.enqueue(pcm)
+
+        consumer_task = asyncio.create_task(speaker_consumer(), name="tts-consumer")
+
+        async def submit(text: str) -> None:
+            if not text.strip():
+                return
+            LOGGER.info("TTS chunk: %s", text)
+            # Record what we're about to speak before any TTS / playback
+            # latency so a quick echo round-trip (~1s) is already in the
+            # self-loop window when ASR transcribes it.
+            self._record_spoken(text)
+            spoken_segments.append(text)
+            pcm_q: asyncio.Queue[bytes | None] = asyncio.Queue()
+            # Reserve the slot before spawning so the bounded queue actually
+            # caps concurrent WS handshakes; otherwise a fast LLM stream
+            # could spawn an unbounded number of synth tasks faster than
+            # the consumer drains them.
+            await pipeline.put((text, pcm_q))
+            synth_tasks.append(
+                asyncio.create_task(synth_worker(text, pcm_q), name="tts-synth")
+            )
+
         try:
             async for token in self._ark.stream(
                 self._history,
@@ -529,20 +593,41 @@ class ChatOrchestrator:
                     if not chunk:
                         break
                     pending = pending[len(chunk):]
-                    await self._speak_chunk(chunk, cancel)
-                    spoken_segments.append(chunk)
+                    await submit(chunk)
                     if cancel.is_set():
                         break
 
             if pending and not cancel.is_set():
-                await self._speak_chunk(pending, cancel)
-                spoken_segments.append(pending)
+                await submit(pending)
                 pending = ""
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             LOGGER.exception("assistant turn failed: %s", exc)
         finally:
+            # Signal end-of-stream and let the consumer drain whatever's
+            # already queued. The consumer keeps pulling even under cancel
+            # (just dropping frames), so this put never deadlocks on a
+            # full queue.
+            try:
+                await pipeline.put(None)
+            except Exception:
+                pass
+
+            # Synth workers exit promptly when `cancel` is set (the TTS
+            # client checks it between recvs), so we await them rather
+            # than cancelling — we want any tail audio that has already
+            # arrived to make it to the speaker on a clean finish.
+            for t in synth_tasks:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                await consumer_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
             spoken_text = "".join(spoken_segments)
             generated_text = (spoken_text + pending).strip()
             interrupted = cancel.is_set()
@@ -562,22 +647,6 @@ class ChatOrchestrator:
 
             if not interrupted:
                 await self._speaker.wait_drained()
-
-    async def _speak_chunk(self, text: str, cancel: asyncio.Event) -> None:
-        if not text.strip():
-            return
-        LOGGER.info("TTS chunk: %s", text)
-        # Record what we're about to speak before any TTS / playback latency
-        # so a quick echo round-trip (~1s) is already in the window when ASR
-        # transcribes it.
-        self._record_spoken(text)
-        try:
-            async for pcm in self._tts.synthesize(text, cancel_event=cancel):
-                if cancel.is_set():
-                    break
-                self._speaker.enqueue(pcm)
-        except Exception as exc:
-            LOGGER.warning("TTS failed for chunk %r: %s", text, exc)
 
     async def _shutdown(self) -> None:
         self._cancel_barge_in_watcher()

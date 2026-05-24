@@ -198,7 +198,7 @@ async def amain(args: argparse.Namespace) -> None:
     vad_min_silence_ms = (
         args.vad_min_silence_ms
         if args.vad_min_silence_ms is not None
-        else env_int("VAD_MIN_SILENCE_MS", 800)
+        else env_int("VAD_MIN_SILENCE_MS", 500)
     )
     vad_min_speech_ms = (
         args.vad_min_speech_ms

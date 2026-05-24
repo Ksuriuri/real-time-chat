@@ -71,8 +71,9 @@ uv run python volcengine_streaming_asr.py /path/to/audio.wav
 
 Optional knobs:
 
-- `VAD_MIN_SILENCE_MS=800` — silence (ms) before VAD declares the user done
-  (this is what triggers ASR finalize and the LLM call).
+- `VAD_MIN_SILENCE_MS=500` — silence (ms) before VAD declares the user done
+  (this is what triggers ASR finalize and the LLM call). Lower = snappier
+  end-of-turn but more cuts on mid-sentence pauses.
 - `VAD_MIN_SPEECH_MS=250` — minimum sustained voice before VAD fires
   `speech_start` (also the barge-in threshold).
 - `TTS_SPEAKER`, `TTS_MODEL` — `seed-tts-2.0` voice and model variant.
