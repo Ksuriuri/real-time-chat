@@ -482,7 +482,7 @@ class ChatOrchestrator:
             LOGGER.info("Barge-in: cancelling assistant turn")
             if cancel is not None:
                 cancel.set()
-            self._speaker.flush_and_restart()
+            self._speaker.flush()
             try:
                 # `shield` keeps a cancellation of *this* coroutine from
                 # cascading into the assistant task. The cancel event above

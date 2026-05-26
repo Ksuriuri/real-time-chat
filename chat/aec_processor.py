@@ -2,9 +2,9 @@
 
 The module owns a single `pywebrtc_audio.AudioProcessor` instance plus a
 thread-safe ring buffer for the far-side reference signal. Two threads touch
-it: the speaker writer thread pushes the PCM it just sent to the audio driver
-(resampled to the AEC sample rate), and the mic input callback pops a matching
-chunk and runs `process()` to produce echo-suppressed audio.
+it: the speaker output callback pushes the PCM it is about to hand to the
+audio driver (resampled to the AEC sample rate), and the mic input callback
+pops a matching chunk and runs `process()` to produce echo-suppressed audio.
 
 `stream_delay_ms=0` puts AEC3 in DELAY_AGNOSTIC mode: the algorithm tracks the
 real round-trip delay between far and near via cross-correlation, so we don't
@@ -98,7 +98,7 @@ class AecProcessor:
     def clear_far(self) -> None:
         """Drop pending far-side reference samples without resetting AEC state.
 
-        Called after `SpeakerSink.flush_and_restart` aborts queued playback.
+        Called after `SpeakerSink.flush` drops queued playback on barge-in.
         We deliberately keep AEC3's adapted filter coefficients so the canceller
         doesn't have to re-converge (~1s) on every barge-in; only the unplayed
         reference samples that no longer correspond to anything coming out of
