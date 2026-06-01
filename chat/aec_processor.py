@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 import numpy as np
 
@@ -41,6 +42,12 @@ class AecProcessor:
         max_buffer_ms: int = 1000,
         ns_level: int = 2,
         stream_delay_ms: int = 0,
+        dt_enabled: bool = True,
+        dt_ratio: float = 0.5,
+        dt_far_active_rms: float = 300.0,
+        dt_near_floor_rms: float = 300.0,
+        dt_min_blocks: int = 3,
+        dt_hold_ms: int = 1000,
     ) -> None:
         if AudioProcessor is None:
             raise RuntimeError(
@@ -60,6 +67,29 @@ class AecProcessor:
         self._max_far_samples = sample_rate * max_buffer_ms // 1000
         self._far_buf = np.zeros(0, dtype=np.int16)
         self._lock = threading.Lock()
+
+        # --- Double-talk detection -------------------------------------
+        # Residual echo scales with the far (playback) level, so the ratio
+        # `clean_rms / far_rms` is roughly constant while only echo is present
+        # *regardless of speaker volume*. Genuine near-end speech adds energy
+        # that is NOT in the far reference, so the ratio spikes. We vote a
+        # block as double-talk when the far side is clearly active, the
+        # echo-cancelled near level clears an absolute floor, and that level is
+        # a large fraction of the far level. This is what lets a loud playback
+        # still be interrupted: the threshold is relative, not absolute.
+        self._dt_enabled = dt_enabled
+        self._dt_ratio = dt_ratio
+        self._dt_far_active_rms = dt_far_active_rms
+        self._dt_near_floor_rms = dt_near_floor_rms
+        self._dt_min_blocks = dt_min_blocks
+        self._dt_hold_s = dt_hold_ms / 1000.0
+        self._dt_lock = threading.Lock()
+        self._dt_votes = 0
+        # Monotonic timestamp of the most recent latched double-talk decision
+        # (0.0 means "never"). The orchestrator compares this against the start
+        # of the current utterance to decide whether to honor a barge-in even
+        # when the transcription overlaps recent assistant speech.
+        self._dt_last_t = 0.0
 
     @property
     def sample_rate(self) -> int:
@@ -93,7 +123,44 @@ class AecProcessor:
                 if available:
                     far[:available] = self._far_buf
                     self._far_buf = np.zeros(0, dtype=np.int16)
-            return self._ap.process(near_int16, far)
+            clean = self._ap.process(near_int16, far)
+        # Run double-talk detection outside the far-buffer lock (it has its
+        # own lock) so it never serializes against the speaker thread's
+        # push_far. `far` and `clean` are local copies, safe to read here.
+        if self._dt_enabled:
+            self._update_double_talk(clean, far)
+        return clean
+
+    @staticmethod
+    def _rms(samples: np.ndarray) -> float:
+        if samples.size == 0:
+            return 0.0
+        f = samples.astype(np.float64)
+        return float(np.sqrt(np.mean(f * f)))
+
+    def _update_double_talk(self, clean: np.ndarray, far: np.ndarray) -> None:
+        far_rms = self._rms(far)
+        clean_rms = self._rms(clean)
+        vote = (
+            far_rms >= self._dt_far_active_rms
+            and clean_rms >= self._dt_near_floor_rms
+            and clean_rms >= self._dt_ratio * far_rms
+        )
+        with self._dt_lock:
+            if vote:
+                self._dt_votes += 1
+                # Require a few consecutive votes so a single residual-echo
+                # transient (or a codec/clipping blip) can't masquerade as
+                # near-end speech.
+                if self._dt_votes >= self._dt_min_blocks:
+                    self._dt_last_t = time.monotonic()
+            else:
+                self._dt_votes = 0
+
+    def last_double_talk_t(self) -> float:
+        """Monotonic timestamp of the most recent double-talk latch (0 = never)."""
+        with self._dt_lock:
+            return self._dt_last_t
 
     def clear_far(self) -> None:
         """Drop pending far-side reference samples without resetting AEC state.
@@ -106,6 +173,10 @@ class AecProcessor:
         """
         with self._lock:
             self._far_buf = np.zeros(0, dtype=np.int16)
+        # Drop the in-progress vote streak: the playback that produced it is
+        # gone, so a half-counted run must not bleed into the next utterance.
+        with self._dt_lock:
+            self._dt_votes = 0
 
     def reset(self) -> None:
         """Drop far-side state AND flush AEC3 filter coefficients.

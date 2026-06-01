@@ -69,6 +69,28 @@ set -a; source ../.env; set +a
 uv run python volcengine_streaming_asr.py /path/to/audio.wav
 ```
 
+### Choosing a TTS provider
+
+`TTS_PROVIDER` selects the voice backend:
+
+- `volcengine` (default) — `seed-tts-2.0`, uses `VOLCENGINE_TTS_API_KEY`.
+- `fish` — Fish Audio, uses `FISH_API_KEY`.
+
+To use Fish Audio with **your own reference voice** (zero-shot cloning), set:
+
+```bash
+TTS_PROVIDER=fish
+FISH_API_KEY=your-fish-audio-api-key
+FISH_REFERENCE_AUDIO=/abs/path/to/your_sample.wav   # 10-30s clear speech
+FISH_REFERENCE_TEXT=这段参考音频里说的原文          # exact transcript
+```
+
+The orchestrator requests `format=pcm, sample_rate=24000`, so Fish audio feeds
+the speaker directly with no decode/resample step. `FISH_MODEL` (`s1` /
+`s2-pro`) and `FISH_LATENCY` (`normal` / `balanced` / `low`) are optional. If
+you skip `FISH_REFERENCE_AUDIO` you can instead point `FISH_REFERENCE_ID` at a
+hosted voice model from fish.audio.
+
 Optional knobs:
 
 - `VAD_MIN_SILENCE_MS=500` — silence (ms) before VAD declares the user done
@@ -123,7 +145,7 @@ new user turn. Ctrl+C exits cleanly.
 | `--asr-chunk-ms` | CLI | ASR audio frame size. 200 ms balances latency and overhead. |
 | `--asr-finalize-timeout-s` | CLI | Max wait after `speech_end` before falling back to the last partial transcript. |
 | `--llm-max-output-tokens` | CLI | Cap on assistant length. |
-| `MID_SENTENCE_MIN_LEN` / `HARD_FLUSH_LEN` | `orchestrator.py` | TTS chunking thresholds; tweak if first audio is too late or too choppy. |
+| `MID_SENTENCE_MIN_LEN` / `HARD_FLUSH_LEN` / `CJK_MAX_BUFFER_LEN` | `orchestrator.py` | TTS chunking thresholds. `HARD_FLUSH_LEN` only applies to the first chunk (first-audio latency); later chunks wait for a punctuation break up to `CJK_MAX_BUFFER_LEN` so words aren't split. Tweak if first audio is too late or too choppy. |
 
 ## Troubleshooting
 

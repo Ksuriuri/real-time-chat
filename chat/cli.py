@@ -13,7 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from aec_processor import AecProcessor
-from audio_io import MicSource, SpeakerSink
+from audio_io import SPEAKER_SAMPLE_RATE, MicSource, SpeakerSink
 from conversation import AsyncArkStream, ConversationHistory
 from orchestrator import (
     ChatOrchestrator,
@@ -21,6 +21,7 @@ from orchestrator import (
     build_asr_factory,
     build_executor,
 )
+from fish_tts_client import FishTtsClient
 from tts_client import SeedTtsClient
 from vad_client import VadClient
 
@@ -114,7 +115,15 @@ def env_bool(key: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
-def _build_aec(enable: bool, *, ns_level: int, stream_delay_ms: int) -> AecProcessor | None:
+def _build_aec(
+    enable: bool,
+    *,
+    ns_level: int,
+    stream_delay_ms: int,
+    dt_enabled: bool,
+    dt_ratio: float,
+    dt_hold_ms: int,
+) -> AecProcessor | None:
     if not enable:
         return None
     if not AecProcessor.is_available():
@@ -123,14 +132,24 @@ def _build_aec(enable: bool, *, ns_level: int, stream_delay_ms: int) -> AecProce
         )
         return None
     try:
-        aec = AecProcessor(ns_level=ns_level, stream_delay_ms=stream_delay_ms)
+        aec = AecProcessor(
+            ns_level=ns_level,
+            stream_delay_ms=stream_delay_ms,
+            dt_enabled=dt_enabled,
+            dt_ratio=dt_ratio,
+            dt_hold_ms=dt_hold_ms,
+        )
     except Exception as exc:
         LOGGER.warning("AEC initialization failed (%s); running without AEC.", exc)
         return None
     LOGGER.info(
-        "AEC enabled (WebRTC AEC3 + NS level=%d, stream_delay_ms=%d)",
+        "AEC enabled (WebRTC AEC3 + NS level=%d, stream_delay_ms=%d, "
+        "double_talk=%s ratio=%.2f hold=%dms)",
         ns_level,
         stream_delay_ms,
+        "on" if dt_enabled else "off",
+        dt_ratio,
+        dt_hold_ms,
     )
     return aec
 
@@ -183,13 +202,19 @@ async def amain(args: argparse.Namespace) -> None:
     else:
         LOGGER.warning("No .env file found; relying on shell environment only.")
 
+    tts_provider = (env("TTS_PROVIDER", "volcengine") or "volcengine").lower()
+
     ark_api_key = require(env("ARK_API_KEY"), "ARK_API_KEY")
     asr_api_key = require(env("VOLCENGINE_ASR_API_KEY"), "VOLCENGINE_ASR_API_KEY")
-    tts_api_key = require(env("VOLCENGINE_TTS_API_KEY"), "VOLCENGINE_TTS_API_KEY")
+    if tts_provider == "fish":
+        tts_api_key = require(env("FISH_API_KEY"), "FISH_API_KEY")
+    else:
+        tts_api_key = require(env("VOLCENGINE_TTS_API_KEY"), "VOLCENGINE_TTS_API_KEY")
     LOGGER.info(
-        "Credentials: ARK %s | ASR %s | TTS %s",
+        "Credentials: ARK %s | ASR %s | TTS[%s] %s",
         _mask(ark_api_key),
         _mask(asr_api_key),
+        tts_provider,
         _mask(tts_api_key),
     )
 
@@ -246,17 +271,31 @@ async def amain(args: argparse.Namespace) -> None:
         chunk_ms=args.asr_chunk_ms,
     )
 
-    tts_client = SeedTtsClient(
-        api_key=tts_api_key,
-        resource_id=env("VOLCENGINE_TTS_RESOURCE_ID", "seed-tts-2.0") or "seed-tts-2.0",
-        speaker=env("TTS_SPEAKER", "zh_female_vv_uranus_bigtts") or "zh_female_vv_uranus_bigtts",
-        model=env("TTS_MODEL", "seed-tts-2.0-standard") or "seed-tts-2.0-standard",
-    )
+    if tts_provider == "fish":
+        tts_client = FishTtsClient(
+            api_key=tts_api_key,
+            model=env("FISH_MODEL", "s1") or "s1",
+            reference_audio_path=env("FISH_REFERENCE_AUDIO"),
+            reference_text=env("FISH_REFERENCE_TEXT", "") or "",
+            reference_id=env("FISH_REFERENCE_ID"),
+            sample_rate=SPEAKER_SAMPLE_RATE,
+            latency=env("FISH_LATENCY", "balanced") or "balanced",
+        )
+    else:
+        tts_client = SeedTtsClient(
+            api_key=tts_api_key,
+            resource_id=env("VOLCENGINE_TTS_RESOURCE_ID", "seed-tts-2.0") or "seed-tts-2.0",
+            speaker=env("TTS_SPEAKER", "zh_female_vv_uranus_bigtts") or "zh_female_vv_uranus_bigtts",
+            model=env("TTS_MODEL", "seed-tts-2.0-standard") or "seed-tts-2.0-standard",
+        )
 
     aec = _build_aec(
         env_bool("ENABLE_AEC", True),
         ns_level=env_int("AEC_NS_LEVEL", 2) or 2,
         stream_delay_ms=env_int("AEC_STREAM_DELAY_MS", 0) or 0,
+        dt_enabled=env_bool("AEC_DOUBLE_TALK", True),
+        dt_ratio=env_float("AEC_DT_RATIO", 0.5) or 0.5,
+        dt_hold_ms=env_int("AEC_DT_HOLD_MS", 1000) or 1000,
     )
 
     speaker = SpeakerSink(aec=aec)
@@ -284,6 +323,7 @@ async def amain(args: argparse.Namespace) -> None:
             llm_max_output_tokens=args.llm_max_output_tokens,
             llm_temperature=args.llm_temperature,
         ),
+        aec=aec,
     )
 
     stop = asyncio.Event()

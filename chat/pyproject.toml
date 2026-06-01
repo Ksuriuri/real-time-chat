@@ -1,11 +1,12 @@
 [project]
 name = "real-time-chat-orchestrator"
 version = "0.1.0"
-description = "Realtime voice chat orchestrator wiring Silero VAD, Volcengine ASR, Ark LLM and seed-tts-2.0."
+description = "Realtime voice chat orchestrator wiring Silero VAD, Volcengine ASR, Ark LLM and seed-tts-2.0 / Fish Audio TTS."
 requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28",
     "numpy>=2.0",
+    "ormsgpack>=1.9",
     "pywebrtc-audio>=0.1",
     "python-dotenv>=1.0",
     "sounddevice>=0.5",

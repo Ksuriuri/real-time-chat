@@ -45,3 +45,5 @@ htmlcov/
 tts/output/
 
 temp.py
+
+assets/

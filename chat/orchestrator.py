@@ -17,6 +17,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from aec_processor import AecProcessor
 from asr_client import StreamingAsrSession
 from audio_io import MicSource, SpeakerSink
 from conversation import AsyncArkStream, ConversationHistory
@@ -26,10 +27,69 @@ from vad_client import VadClient, VadEvent
 
 LOGGER = logging.getLogger(__name__)
 
+# Emoji / pictograph ranges to strip before TTS so the voice doesn't try to
+# vocalize them (the LLM sprinkles things like 🥺 into replies).
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001f000-\U0001faff"  # emoticons, pictographs, transport, supplemental, ext-A
+    "\U00002600-\U000026ff"  # miscellaneous symbols
+    "\U00002700-\U000027bf"  # dingbats
+    "\U00002b00-\U00002bff"  # misc symbols and arrows (e.g. ⭐)
+    "\U00002300-\U000023ff"  # misc technical (e.g. ⏰⌚)
+    "\U0000fe00-\U0000fe0f"  # variation selectors
+    "\U0000200d"             # zero-width joiner (emoji sequences)
+    "\U000020e3"             # combining enclosing keycap
+    "]+",
+    flags=re.UNICODE,
+)
+
+# Marks Fish (and other TTS) tend to vocalize literally or glitch on. Collapse
+# ellipsis / em-dash / "..." runs into a single pause comma instead of letting
+# the model read them out loud.
+_TTS_PAUSE_PATTERN = re.compile(r"[…⋯]+|—{2,}|—|\.{3,}|·{2,}")
+# Stylistic / markdown noise that carries no speech value.
+_TTS_DROP_PATTERN = re.compile(r"[~～*#`_<>^|]+")
+# At least one CJK / kana / hangul / latin / digit means there is something
+# real to speak; otherwise the chunk is punctuation-only and we skip it.
+_SPEAKABLE_PATTERN = re.compile(
+    r"[0-9A-Za-z\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]"
+)
+_MULTI_COMMA_PATTERN = re.compile(r"[，,]{2,}")
+
+
+def strip_emoji(text: str) -> str:
+    """Remove emoji / pictographs while keeping normal punctuation intact."""
+    return _EMOJI_PATTERN.sub("", text)
+
+
+def normalize_for_tts(text: str) -> str:
+    """Clean a chunk before synthesis.
+
+    Strips emoji, turns ellipsis/dash runs into a single pause comma, drops
+    markdown / tone noise, and returns ``""`` when nothing speakable remains so
+    the caller can skip punctuation-only chunks (e.g. a lone "…") that make
+    Fish read garbage.
+    """
+    text = strip_emoji(text)
+    text = _TTS_PAUSE_PATTERN.sub("，", text)
+    text = _TTS_DROP_PATTERN.sub("", text)
+    text = _MULTI_COMMA_PATTERN.sub("，", text)
+    if not _SPEAKABLE_PATTERN.search(text):
+        return ""
+    # Drop pause commas / whitespace that ended up leading or trailing.
+    return text.strip().strip("，,").strip()
+
+
 SENTENCE_TERMINATORS = "。？！；…!?\n"
-MID_SENTENCE_BREAKS = "，、：:,;"
+MID_SENTENCE_BREAKS = "，、：:,;～~"
 MID_SENTENCE_MIN_LEN = 10
 HARD_FLUSH_LEN = 30
+# Safety net for CJK buffers once the first chunk has already been spoken.
+# Much larger than HARD_FLUSH_LEN so we keep waiting for a natural punctuation
+# break (terminator / comma) instead of slicing a word like "小进展" in half.
+# Only fires for a runaway burst with no punctuation; by then playback is
+# already underway so the extra buffering is inaudible.
+CJK_MAX_BUFFER_LEN = 50
 # Safety net for pure-English buffers that haven't produced a sentence
 # terminator yet. Generous so we don't slice a sentence mid-clause, but
 # still bounded so a runaway unpunctuated response eventually flushes.
@@ -78,10 +138,16 @@ def _terminator_end(pending: str) -> int:
     return -1
 
 
-def pop_speakable_chunk(pending: str) -> str:
+def pop_speakable_chunk(pending: str, *, latency_critical: bool = False) -> str:
     """Return the longest leading slice of ``pending`` ready to be spoken.
 
     Returns an empty string when more characters should be buffered.
+
+    ``latency_critical`` should be ``True`` only while we still owe the user
+    first audio. In that window we accept an aggressive mid-word hard-flush to
+    keep first-audio latency bounded; once playback has started we keep
+    buffering until a natural punctuation boundary so a word like "小进展" is
+    never split across two chunks.
     """
     if not pending:
         return ""
@@ -92,13 +158,17 @@ def pop_speakable_chunk(pending: str) -> str:
 
     if _has_cjk(pending):
         # CJK / mixed content: dense per-char and missing word boundaries,
-        # so cut on a comma once the chunk is long enough, or hard-flush
-        # at 30 chars to keep first-audio latency bounded.
+        # so cut on a comma once the chunk is long enough.
         if len(pending) >= MID_SENTENCE_MIN_LEN:
             for index, char in enumerate(pending):
                 if char in MID_SENTENCE_BREAKS and index + 1 >= MID_SENTENCE_MIN_LEN:
                     return pending[: index + 1]
-        if len(pending) >= HARD_FLUSH_LEN:
+        # No punctuation break yet. Hard-flush mid-word only for the very
+        # first chunk (first-audio latency); afterwards wait much longer so we
+        # don't slice a word, falling back to the safety net only on a runaway
+        # unpunctuated burst.
+        flush_len = HARD_FLUSH_LEN if latency_critical else CJK_MAX_BUFFER_LEN
+        if len(pending) >= flush_len:
             space = pending.rfind(" ")
             if space >= MID_SENTENCE_MIN_LEN:
                 return pending[:space]
@@ -140,6 +210,7 @@ class ChatOrchestrator:
         ark_stream: AsyncArkStream,
         history: ConversationHistory,
         config: OrchestratorConfig | None = None,
+        aec: AecProcessor | None = None,
     ) -> None:
         self._vad = vad_client
         self._mic = mic
@@ -149,6 +220,12 @@ class ChatOrchestrator:
         self._ark = ark_stream
         self._history = history
         self._config = config or OrchestratorConfig()
+        # AEC exposes a double-talk signal (near-end speech detected while the
+        # speaker is playing). When present it lets a barge-in through even if
+        # the transcription overlaps recent assistant speech, which is the
+        # case the text-only self-loop filter wrongly suppresses at high
+        # speaker volume (loud residual echo dominates the partial).
+        self._aec = aec
 
         self._asr_session: StreamingAsrSession | None = None
         self._asr_lock = asyncio.Lock()
@@ -188,6 +265,13 @@ class ChatOrchestrator:
         # set to 1 for maximum responsiveness, raise back to 4 if you see
         # spurious cancellations while wearing no headphones.
         self._barge_in_min_chars = 2
+        # Monotonic time of the latest speech_start, used to ask "did AEC see
+        # double-talk during *this* utterance?". The grace window reaches back
+        # before the event because VAD only emits speech_start after
+        # min_speech_ms (+ padding), so the user's voice — and the double-talk
+        # votes it triggers — precede the event by a few hundred ms.
+        self._speech_start_t = 0.0
+        self._dt_grace_s = 1.0
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
@@ -268,17 +352,28 @@ class ChatOrchestrator:
         # `_pending_pcm` buffer captures everything that arrives after this
         # point until the ASR session takes over.
         preroll = self._mic.preroll.snapshot()
+        self._speech_start_t = time.monotonic()
         pending: list[bytes] = []
         self._pending_pcm = pending
 
-        # Defer barge-in when the speaker is currently producing audio so a
-        # mic-feedback / acoustic-echo blip can't kill the assistant. The
-        # cancel decision is gated on real ASR confirmation below (either the
-        # partial-text watcher or the non-empty finalize in `speech_end`).
+        # Defer barge-in when an assistant turn is in flight so a mic-feedback
+        # / acoustic-echo blip (or a spurious VAD trigger) can't kill it. We
+        # can't gate on `speaker.is_active()` alone: there's a ~1s window after
+        # the LLM responds where we've dispatched TTS chunks but the first PCM
+        # frame hasn't been synthesized back yet, so the speaker reads as idle
+        # even though a real turn is underway. A speech_start landing in that
+        # window used to take the unconditional-cancel path and kill the turn
+        # before any audio played. Treat "task exists and not done" as
+        # in-flight too, so both the generating and the speaking phases get the
+        # ASR-confirmation guard below.
         speaker_was_active = self._speaker.is_active()
+        assistant_in_flight = (
+            self._assistant_task is not None and not self._assistant_task.done()
+        )
+        defer_barge_in = speaker_was_active or assistant_in_flight
 
         try:
-            if not speaker_was_active:
+            if not defer_barge_in:
                 await self._barge_in_if_speaking()
 
             async with self._asr_lock:
@@ -306,7 +401,7 @@ class ChatOrchestrator:
                 self._asr_session = session
                 self._pending_pcm = None
 
-            if speaker_was_active:
+            if defer_barge_in:
                 self._barge_in_watcher = asyncio.create_task(
                     self._watch_for_barge_in(session),
                     name="barge-in-watcher",
@@ -338,11 +433,18 @@ class ChatOrchestrator:
             if not text:
                 continue
             if self._is_self_loop(text):
-                LOGGER.info(
-                    "Suppressing echo-likely partial: %r",
-                    text[:40],
-                )
-                continue
+                if self._double_talk_active():
+                    LOGGER.info(
+                        "Double-talk detected; overriding echo filter for "
+                        "barge-in (%r)",
+                        text[:40],
+                    )
+                else:
+                    LOGGER.info(
+                        "Suppressing echo-likely partial: %r",
+                        text[:40],
+                    )
+                    continue
             # Short partials happen at the start of every utterance; defer
             # the barge-in until the transcription has enough content for
             # us to confidently distinguish real speech from a fragment of
@@ -354,6 +456,21 @@ class ChatOrchestrator:
             )
             await self._barge_in_if_speaking()
             return
+
+    def _double_talk_active(self) -> bool:
+        """True when AEC detected near-end speech during the current utterance.
+
+        Used to override the text-based self-loop filter: if the user is
+        genuinely talking over the assistant (double-talk), the transcription
+        may overlap recent assistant speech because loud residual echo bleeds
+        into the partial, yet the barge-in is real and must go through.
+        """
+        if self._aec is None:
+            return False
+        last_t = self._aec.last_double_talk_t()
+        if last_t <= 0.0:
+            return False
+        return last_t >= self._speech_start_t - self._dt_grace_s
 
     def _cancel_barge_in_watcher(self) -> None:
         watcher = self._barge_in_watcher
@@ -442,11 +559,18 @@ class ChatOrchestrator:
             LOGGER.info("ASR returned empty text; ignoring utterance")
             return
         if self._is_self_loop(text):
-            LOGGER.info(
-                "Discarding self-loop transcription (%r); assistant continues.",
-                text[:60],
-            )
-            return
+            if self._double_talk_active():
+                LOGGER.info(
+                    "Double-talk detected; keeping transcription despite echo "
+                    "match (%r)",
+                    text[:60],
+                )
+            else:
+                LOGGER.info(
+                    "Discarding self-loop transcription (%r); assistant continues.",
+                    text[:60],
+                )
+                return
 
         LOGGER.info("USER: %s", text)
         # If barge-in was deferred (speaker was active and the watcher hadn't
@@ -557,7 +681,8 @@ class ChatOrchestrator:
         consumer_task = asyncio.create_task(speaker_consumer(), name="tts-consumer")
 
         async def submit(text: str) -> None:
-            if not text.strip():
+            text = normalize_for_tts(text)
+            if not text:
                 return
             LOGGER.info("TTS chunk: %s", text)
             # Record what we're about to speak before any TTS / playback
@@ -589,7 +714,12 @@ class ChatOrchestrator:
                     LOGGER.debug("LLM token: %r", token.text)
 
                 while True:
-                    chunk = pop_speakable_chunk(pending)
+                    # Latency only matters until the user has heard something;
+                    # before that we tolerate an aggressive mid-word flush, after
+                    # that we hold out for a natural punctuation break.
+                    chunk = pop_speakable_chunk(
+                        pending, latency_critical=not spoken_segments
+                    )
                     if not chunk:
                         break
                     pending = pending[len(chunk):]
@@ -629,7 +759,7 @@ class ChatOrchestrator:
                 pass
 
             spoken_text = "".join(spoken_segments)
-            generated_text = (spoken_text + pending).strip()
+            generated_text = strip_emoji(spoken_text + pending).strip()
             interrupted = cancel.is_set()
             # Only persist the assistant turn when the model actually produced
             # text. An empty "[interrupted]" item would just confuse the next
